@@ -1,5 +1,5 @@
 # Import necessary libraries
-from flask import Flask, request
+from flask import Flask, request, jsonify
 from twilio.twiml.messaging_response import MessagingResponse
 from twilio.rest import Client
 import threading
@@ -108,13 +108,16 @@ def schedule_consecutive_reminders(to_number, message, target_date, time_str):
     if days_until_target <= 0:
         # Schedule single reminder for today/past date
         reminder_id = save_reminder_to_db(to_number, message, target_datetime)
-        scheduler.add_job(
-            send_reminder,
-            'date',
-            run_date=target_datetime,
-            args=[to_number, message, reminder_id],
-            id=f"reminder_{reminder_id}"
-        )
+        try:
+            scheduler.add_job(
+                send_reminder,
+                'date',
+                run_date=target_datetime,
+                args=[to_number, message, reminder_id],
+                id=f"reminder_{reminder_id}"
+            )
+        except Exception as e:
+            print(f"Error scheduling reminder: {e}")
         reminder_dates.append(target_datetime.strftime("%Y-%m-%d %H:%M"))
     else:
         # Schedule multiple reminders
@@ -123,68 +126,80 @@ def schedule_consecutive_reminders(to_number, message, target_date, time_str):
         if days_before_first > 0:
             first_reminder = target_datetime - timedelta(days=days_before_first)
             reminder_id = save_reminder_to_db(to_number, f"Upcoming in {days_before_first} days: {message}", first_reminder, 'consecutive')
-            scheduler.add_job(
-                send_reminder,
-                'date',
-                run_date=first_reminder,
-                args=[to_number, f"Upcoming in {days_before_first} days: {message}", reminder_id],
-                id=f"reminder_{reminder_id}"
-            )
+            try:
+                scheduler.add_job(
+                    send_reminder,
+                    'date',
+                    run_date=first_reminder,
+                    args=[to_number, f"Upcoming in {days_before_first} days: {message}", reminder_id],
+                    id=f"reminder_{reminder_id}"
+                )
+            except Exception as e:
+                print(f"Error scheduling reminder: {e}")
             reminder_dates.append(first_reminder.strftime("%Y-%m-%d %H:%M"))
         
         # Second reminder: 2 days before
         if days_until_target > 2:
             second_reminder = target_datetime - timedelta(days=2)
             reminder_id = save_reminder_to_db(to_number, f"Coming up in 2 days: {message}", second_reminder, 'consecutive')
-            scheduler.add_job(
-                send_reminder,
-                'date',
-                run_date=second_reminder,
-                args=[to_number, f"Coming up in 2 days: {message}", reminder_id],
-                id=f"reminder_{reminder_id}"
-            )
+            try:
+                scheduler.add_job(
+                    send_reminder,
+                    'date',
+                    run_date=second_reminder,
+                    args=[to_number, f"Coming up in 2 days: {message}", reminder_id],
+                    id=f"reminder_{reminder_id}"
+                )
+            except Exception as e:
+                print(f"Error scheduling reminder: {e}")
             reminder_dates.append(second_reminder.strftime("%Y-%m-%d %H:%M"))
         
         # Final reminder: On the day
         reminder_id = save_reminder_to_db(to_number, f"Today: {message}", target_datetime, 'consecutive')
-        scheduler.add_job(
-            send_reminder,
-            'date',
-            run_date=target_datetime,
-            args=[to_number, f"Today: {message}", reminder_id],
-            id=f"reminder_{reminder_id}"
-        )
+        try:
+            scheduler.add_job(
+                send_reminder,
+                'date',
+                run_date=target_datetime,
+                args=[to_number, f"Today: {message}", reminder_id],
+                id=f"reminder_{reminder_id}"
+            )
+        except Exception as e:
+            print(f"Error scheduling reminder: {e}")
         reminder_dates.append(target_datetime.strftime("%Y-%m-%d %H:%M"))
     
     return reminder_dates
 
 def load_pending_reminders():
     """Load and reschedule pending reminders from database"""
-    conn = sqlite3.connect(DATABASE_PATH)
-    cursor = conn.cursor()
-    
-    cursor.execute('''
-        SELECT id, user_phone, message, scheduled_time 
-        FROM reminders 
-        WHERE status = 'active' AND scheduled_time > datetime('now')
-    ''')
-    
-    pending_reminders = cursor.fetchall()
-    conn.close()
-    
-    for reminder_id, user_phone, message, scheduled_time_str in pending_reminders:
-        try:
-            scheduled_time = datetime.fromisoformat(scheduled_time_str)
-            scheduler.add_job(
-                send_reminder,
-                'date',
-                run_date=scheduled_time,
-                args=[user_phone, message, reminder_id],
-                id=f"reminder_{reminder_id}"
-            )
-            print(f"Rescheduled reminder {reminder_id} for {scheduled_time}")
-        except Exception as e:
-            print(f"Error rescheduling reminder {reminder_id}: {e}")
+    try:
+        conn = sqlite3.connect(DATABASE_PATH)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            SELECT id, user_phone, message, scheduled_time 
+            FROM reminders 
+            WHERE status = 'active' AND scheduled_time > datetime('now')
+        ''')
+        
+        pending_reminders = cursor.fetchall()
+        conn.close()
+        
+        for reminder_id, user_phone, message, scheduled_time_str in pending_reminders:
+            try:
+                scheduled_time = datetime.fromisoformat(scheduled_time_str.replace(' ', 'T'))
+                scheduler.add_job(
+                    send_reminder,
+                    'date',
+                    run_date=scheduled_time,
+                    args=[user_phone, message, reminder_id],
+                    id=f"reminder_{reminder_id}"
+                )
+                print(f"Rescheduled reminder {reminder_id} for {scheduled_time}")
+            except Exception as e:
+                print(f"Error rescheduling reminder {reminder_id}: {e}")
+    except Exception as e:
+        print(f"Error loading pending reminders: {e}")
 
 # Configure scheduler with persistent job store
 jobstores = {
@@ -199,6 +214,7 @@ job_defaults = {
 }
 
 # Initialize scheduler with persistent storage
+scheduler = None
 try:
     scheduler = BackgroundScheduler(
         jobstores=jobstores,
@@ -215,7 +231,62 @@ except Exception as e:
     print(f"Error starting scheduler: {e}")
 
 # Shutdown scheduler gracefully
-atexit.register(lambda: scheduler.shutdown())
+def shutdown_scheduler():
+    if scheduler and scheduler.running:
+        scheduler.shutdown()
+        
+atexit.register(shutdown_scheduler)
+
+# Alternative cron endpoint for external services
+@app.route("/check-reminders", methods=["GET", "POST"])
+def check_reminders():
+    """Endpoint to be called by external cron service"""
+    try:
+        conn = sqlite3.connect(DATABASE_PATH)
+        cursor = conn.cursor()
+        
+        # Get reminders that should be sent now (within 2 minute window)
+        current_time = datetime.now()
+        window_start = current_time - timedelta(minutes=2)
+        
+        cursor.execute('''
+            SELECT id, user_phone, message, scheduled_time 
+            FROM reminders 
+            WHERE status = 'active' 
+            AND scheduled_time BETWEEN ? AND ?
+        ''', (window_start.isoformat(), current_time.isoformat()))
+        
+        due_reminders = cursor.fetchall()
+        sent_count = 0
+        
+        for reminder_id, user_phone, message, scheduled_time in due_reminders:
+            try:
+                # Send the reminder
+                client.messages.create(
+                    body=f"⏰ Reminder: {message}",
+                    from_=TWILIO_WHATSAPP_NUMBER,
+                    to=user_phone
+                )
+                
+                # Mark as sent
+                cursor.execute("UPDATE reminders SET status = 'sent' WHERE id = ?", (reminder_id,))
+                sent_count += 1
+                print(f"Sent reminder {reminder_id} to {user_phone}")
+                
+            except Exception as e:
+                print(f"Error sending reminder {reminder_id}: {e}")
+        
+        conn.commit()
+        conn.close()
+        
+        return jsonify({
+            "status": "success",
+            "reminders_sent": sent_count,
+            "timestamp": current_time.isoformat()
+        })
+        
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 def parse_date(date_str):
     """Parse date from various formats"""
@@ -266,6 +337,9 @@ def parse_date(date_str):
 
 def get_month_number(month_name):
     """Convert month name to month number"""
+    if not month_name:
+        return None
+        
     month_name = month_name.lower()
     months = {
         'jan': 1, 'january': 1, 'feb': 2, 'february': 2,
@@ -301,7 +375,15 @@ def get_user_reminders(user_phone):
 # Health check endpoint for Render
 @app.route("/health", methods=["GET"])
 def health_check():
-    return {"status": "healthy", "scheduler_running": scheduler.running}
+    try:
+        scheduler_running = scheduler.running if scheduler else False
+        return jsonify({
+            "status": "healthy", 
+            "scheduler_running": scheduler_running,
+            "timestamp": datetime.now().isoformat()
+        })
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 @app.route("/", methods=["POST"])
 def bot():
@@ -331,8 +413,11 @@ def bot():
         if reminders:
             msg = "📋 Your active reminders:\n\n"
             for i, (message, scheduled_time, status) in enumerate(reminders, 1):
-                dt = datetime.fromisoformat(scheduled_time)
-                msg += f"{i}. {message}\n   📅 {dt.strftime('%d %b %Y at %H:%M')}\n\n"
+                try:
+                    dt = datetime.fromisoformat(scheduled_time.replace(' ', 'T'))
+                    msg += f"{i}. {message}\n   📅 {dt.strftime('%d %b %Y at %H:%M')}\n\n"
+                except:
+                    msg += f"{i}. {message}\n   📅 {scheduled_time}\n\n"
         else:
             msg = "You have no active reminders."
         response.message(msg)
@@ -396,8 +481,11 @@ def bot():
         if len(reminder_dates) > 1:
             msg += "You'll be reminded on:\n"
             for date_str in reminder_dates:
-                reminder_date = datetime.strptime(date_str, "%Y-%m-%d %H:%M")
-                msg += f"- {reminder_date.strftime('%d %b')} at {reminder_date.strftime('%H:%M')}\n"
+                try:
+                    reminder_date = datetime.strptime(date_str, "%Y-%m-%d %H:%M")
+                    msg += f"- {reminder_date.strftime('%d %b')} at {reminder_date.strftime('%H:%M')}\n"
+                except:
+                    msg += f"- {date_str}\n"
         
         response.message(msg)
         
@@ -408,27 +496,35 @@ def bot():
         if user_msg.lower().startswith("remind me at"):
             try:
                 parts = user_msg.split(" ", 4)
-                time_part = parts[3]
-                msg_part = parts[4] if len(parts) > 4 else ""
-                remind_time = datetime.strptime(time_part, "%H:%M").replace(
-                    year=datetime.now().year,
-                    month=datetime.now().month,
-                    day=datetime.now().day
-                )
-                
-                if remind_time < datetime.now():
-                    remind_time = remind_time + timedelta(days=1)
-                
-                reminder_id = save_reminder_to_db(from_number, msg_part, remind_time)
-                scheduler.add_job(
-                    send_reminder,
-                    'date',
-                    run_date=remind_time,
-                    args=[from_number, msg_part, reminder_id],
-                    id=f"reminder_{reminder_id}"
-                )
-                
-                response.message(f"Okay, I'll remind you at {remind_time.strftime('%H:%M')} {msg_part} ✅")
+                if len(parts) >= 4:
+                    time_part = parts[3]
+                    msg_part = parts[4] if len(parts) > 4 else "Your reminder"
+                    remind_time = datetime.strptime(time_part, "%H:%M").replace(
+                        year=datetime.now().year,
+                        month=datetime.now().month,
+                        day=datetime.now().day
+                    )
+                    
+                    if remind_time < datetime.now():
+                        remind_time = remind_time + timedelta(days=1)
+                    
+                    reminder_id = save_reminder_to_db(from_number, msg_part, remind_time)
+                    
+                    if scheduler:
+                        try:
+                            scheduler.add_job(
+                                send_reminder,
+                                'date',
+                                run_date=remind_time,
+                                args=[from_number, msg_part, reminder_id],
+                                id=f"reminder_{reminder_id}"
+                            )
+                        except Exception as e:
+                            print(f"Error scheduling job: {e}")
+                    
+                    response.message(f"Okay, I'll remind you at {remind_time.strftime('%H:%M')} about: {msg_part} ✅")
+                else:
+                    response.message("Invalid format. Use: remind me at HH:MM Your message")
             except Exception as e:
                 response.message("Invalid format. Use: remind me at HH:MM Your message")
         else:
@@ -436,6 +532,21 @@ def bot():
 
     return str(response)
 
-if __name__ == "__main__":
-    app.run()
+# Root endpoint for basic info
+@app.route("/", methods=["GET"])
+def home():
+    return jsonify({
+        "name": "RemindMe WhatsApp Bot",
+        "status": "running",
+        "scheduler_running": scheduler.running if scheduler else False,
+        "endpoints": {
+            "webhook": "POST /",
+            "health": "GET /health",
+            "check_reminders": "GET|POST /check-reminders"
+        }
+    })
 
+if __name__ == "__main__":
+    # Render provides the PORT environment variable
+    port = int(os.environ.get('PORT', 10000))
+    app.run(host='0.0.0.0', port=port, debug=False)
