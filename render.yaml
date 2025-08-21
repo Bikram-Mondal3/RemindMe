@@ -1,9 +1,10 @@
+# render.yaml - Place in your project root
 services:
   - type: web
     name: remindme-whatsapp-bot
     env: python
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn --bind 0.0.0.0:$PORT app:app --timeout 120 --workers 1
+    startCommand: gunicorn --bind 0.0.0.0:$PORT app:app --timeout 120 --workers 1 --threads 2
     envVars:
       - key: TWILIO_ACCOUNT_SID
         sync: false
@@ -15,6 +16,6 @@ services:
         value: 3.9.16
     healthCheckPath: /health
     disk:
-      name: data
+      name: reminder-data
       mountPath: /opt/render/project/src
       sizeGB: 1
